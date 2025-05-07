@@ -13,3 +13,4 @@ class Initialize:
         log_msg = language_data[selected_language]
         if log_msg["load config"][1]==1: logging.info(log_msg["load config"][0].format(confile))  
         return configdata  ,log_msg
+    

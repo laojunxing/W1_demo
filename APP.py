@@ -10,6 +10,7 @@ class App:
         self.init = init  
         self.log_msg = log_msg
 
+
     def connection(self):
         try:
             if self.log_msg["connect app"][1]==1: logging.info(self.log_msg["connect app"][0])
