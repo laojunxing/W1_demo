@@ -10,12 +10,12 @@ from unittest.mock import MagicMock
 import math
 from threading import Thread, Event  
 import threading
-# import nest_asyncio
-# nest_asyncio.apply()  # 允许嵌套事件循环
-# from embodychain.deploy.w1.ros2_controller.w1_controller import W1Controller, EndEffectorType
-
-
+import json
+from typing import List, Union, Sequence
 from copy import deepcopy
+from scipy.spatial.transform import Rotation as R
+from scipy.interpolate import CubicSpline
+
 global running
 class W1_Instruction:
 
@@ -35,40 +35,6 @@ class W1_Instruction:
         # self.w1_controller.real_w1_init_qpos = np.array([0.85018, -1.70029, 1.19915, -0.00019, -0.00016, -0.80001, -0.56288, -0.70259,  0.00001, -1.38697,  0.77098, -0.148, -1.70108,  0.56291,  0.66846,  0.00001,  1.3869 , -0.66848, 0.147,  1.69997])
         # self.w1_controller.real_current_qpos = deepcopy(self.w1_controller.real_w1_init_qpos)
         pass
-
-    async def async_MoveJ(self, pose, name):
-        if self.loop is None:
-            self.loop = asyncio.get_running_loop()
-        success = await self.loop.run_in_executor(
-            None, 
-            lambda: self.w1_controller.set_current_qpos(
-                name=name,
-                qpos=pose
-            )
-        )
-        return success
-
-    async def async_MoveL(self, pose, name):
-        """
-        说明:
-            pose_tuple: {"left_arm":robot1pose,"right_arm":robot2pose} 机器人坐标系坐标
-            for key, value in pose_tuple.items():
-                print(key, value)
-                await asyncio.create_task(self.async_MoveL(value, key))
-                pose = [135.681, 379.754, 222.298, -16.289, 85.378, -31.735]
-        """
-        if self.loop is None:
-            self.loop = asyncio.get_running_loop()
-        success = await self.loop.run_in_executor(
-            None, 
-            lambda: self.w1_controller.move_linear(
-                position=pose[:3],
-                orientation=pose[3:],
-                name=name,
-                rotation_sequence="ZYX"
-            )
-        )
-        return success
 
     async def async_MoveJ1(self, pose_tuple):
         """
@@ -90,7 +56,7 @@ class W1_Instruction:
 
         return success
 
-    async def async_MoveL1(self, pose_tuple):
+    def MoveL1(self, pose_tuple,gripper_list):
         """
         说明:
             输入pose_tuple若只含一个运动坐标,自动生成另一个臂当前坐标
@@ -98,72 +64,17 @@ class W1_Instruction:
         """
         # from IPython import embed; embed()
         # 设置TCP坐标系
-        right_tcp_xpos = np.eye(4)
-        right_tcp_xpos[2, 3] = 0.143
-        self.w1_controller.set_tcp_xpos(name="right_arm", tcp_xpos=right_tcp_xpos)
-        left_tcp_xpos = np.eye(4)
-        left_tcp_xpos[2, 3] = 0.143
-        left_tcp_xpos[:3, :3] = Rotation.from_rotvec([0.0, 0.0, 180.], degrees=True).as_matrix()
-        self.w1_controller.set_tcp_xpos(name="left_arm", tcp_xpos=left_tcp_xpos)
+        self.tcp_setting()
 
-        # 设置用户坐标系
-        ro_pos = [336.075, 418.559, 230.13]  # 第一个点 (将作为原点)
-        rx_pos = [333.064, 418.572, 85.135]  # 第二个点 (X 轴方向)
-        rxy_pos = [296.07, 513.566, 135.14]  # 第三个点 (Y 轴方向)
-        self.right_T_matrix = Function.cal_userframe_xpos(ro_pos, rx_pos, rxy_pos)  # 设置用户坐标系
-
-        #   aaa= [-290.381, 488.574, 211.744,0,0,0]
-        lo_pos = [-317.646, 409.471, 295.444]  # 第一个点 (将作为原点)
-        lx_pos = [-322.595, 406.478, 173.461]  # 第二个点 (X 轴方向)
-        lxy_pos = [-290.381, 488.574, 211.744]  # 第三个点 (Y 轴方向)
-        self.left_T_matrix = Function.cal_userframe_xpos(lo_pos, lx_pos, lxy_pos)  # 设置用户坐标系
-
-        left_pose = (pose_tuple["left_arm"]) if "left_arm" in pose_tuple else self.get_current_pose('l')[0]
-        right_pose = (pose_tuple["right_arm"]) if "right_arm" in pose_tuple else self.get_current_pose('r')[0]
-
-        # 将左右臂坐标转换至平面坐标系
-        left_plane = Function.transform_to_plane(left_pose, self.left_T_matrix)
-        right_plane = Function.transform_to_plane(right_pose, self.right_T_matrix)
-        # print("left_plane_pose:", left_plane)
-        # print("right_plane_pose:", right_plane)
-
-        # 平面高度限幅判断，目前直接clip到-1mm(若超过-1mm则直接clip到-1)
-        l_z_down_limit = 0.5
-        if left_plane[2] < l_z_down_limit:
-            if self.log_msg["exit1"][1] == 1:
-                logging.info(self.log_msg["exit1"][0].format(left_plane, l_z_down_limit))
-            left_plane[2] = l_z_down_limit
-            left_pose_adjusted = Function.inverse_transform_from_plane(left_plane, self.left_T_matrix)
-        else:
-            left_pose_adjusted = left_pose
-
-        r_z_down_limit = -0.5
-        if right_plane[2] > r_z_down_limit:
-            if self.log_msg["exit1"][1] == 1:
-                logging.info(self.log_msg["exit1"][0].format(right_plane, r_z_down_limit))
-            right_plane[2] = r_z_down_limit
-            right_pose_adjusted = Function.inverse_transform_from_plane(right_plane, self.right_T_matrix)
-        else:
-            right_pose_adjusted = right_pose
-
-        print("right_pose_adjusted:", right_pose_adjusted)
-        print("left_pose_adjusted:", left_pose_adjusted)
-        if self.loop is None:
-            self.loop = asyncio.get_running_loop()
+        
         success = self.w1_controller.move_linear_dual(
-            left_pose_list=left_pose_adjusted,
-            right_pose_list=right_pose_adjusted,
-            threshold=0.005,  # 直线插值间距为2mm
-            ratio=10       # 5倍速度
+            left_pose_list=pose_tuple["left_arm"],
+            right_pose_list=pose_tuple["right_arm"],
+            threshold=0.01,  # 直线插值间距为2mm
+            ratio=5,      # 5倍速度
+            grasp_states=gripper_list,
         )
-        # success = await self.loop.run_in_executor(
-        #     None, 
-        #     lambda: self.w1_controller.move_linear_dual(
-        #     left_pose_list=left_pose,
-        #     right_pose_list=right_pose,
-        #     threshold=0.005,  # 直线插值间距为2mm
-        #     ratio=5       # 5倍速度
-        #     )
+        self.GoHome()
         return success
 
     def gripper(self,name,status):
@@ -200,12 +111,12 @@ class W1_Instruction:
             ratio=0.5,
             sample_num=10
         )
-        return left_fk_pose_list, right_fk_pose_list 
+        return left_fk_pose_list, right_fk_pose_list
 
     def GoHome(self):
         _ = self.w1_controller.go_home()
-        self.w1_controller.set_gripper_state(1.0, ee_name="right_gripper")
-        self.w1_controller.set_gripper_state(1.0, ee_name="left_gripper")
+        self.w1_controller.set_gripper_state(0.8, ee_name="right_gripper")
+        self.w1_controller.set_gripper_state(0.8, ee_name="left_gripper")
         time.sleep(1.0)
 
     def calibration(self,robot_arm,sign,use_movepse):
@@ -293,6 +204,17 @@ class W1_Instruction:
         else:
             if self.log_msg["calibration_error"][1]==1: logging.info(self.log_msg["calibration_error"][0].format(app_msg,sign)) 
 
+
+    def tcp_setting(self):
+        right_tcp_xpos = np.eye(4)
+        right_tcp_xpos[2, 3] = 0.143
+        self.w1_controller.set_tcp_xpos(name="right_arm", tcp_xpos=right_tcp_xpos)
+        left_tcp_xpos = np.eye(4)
+        left_tcp_xpos[2, 3] = 0.158
+        left_tcp_xpos[1, 3] = 0.02
+        left_tcp_xpos[:3, :3] = Rotation.from_rotvec([0.0, 0.0, 180.], degrees=True).as_matrix()
+        self.w1_controller.set_tcp_xpos(name="left_arm", tcp_xpos=left_tcp_xpos)
+
     def get_current_pose(self,robot):
         """
         获取机械臂当前坐标
@@ -306,6 +228,9 @@ class W1_Instruction:
         """
         if robot == "r": name = 'right_arm' 
         elif robot == "l": name = 'left_arm'
+
+        self.tcp_setting()
+
         W1_deg_pose = self.w1_controller.get_current_pose(name)# 获取臂当前位姿矩阵
         W1_joint_pose = self.w1_controller.get_current_qpos(name)
         W1_deg_pose = [round(num, 3) for num in W1_deg_pose]
@@ -313,187 +238,314 @@ class W1_Instruction:
         if self.log_msg["robot_cart_pose"][1]==1: logging.info(self.log_msg["robot_cart_pose"][0].format(name,W1_deg_pose)) 
         if self.log_msg["robot_joint_pose"][1]==1: logging.info(self.log_msg["robot_joint_pose"][0].format(name,W1_joint_pose)) 
         return W1_deg_pose,W1_joint_pose
-  
-class AGILE_Instruction:
-    def __init__(self,init, log_msg):   
-        import sys  
-        sys.path.append("/home/dexforce/文档/AgileRobot/bin_2.16/AGILE_API")  
-        sys.path.append("/home/dexforce/文档/AgileRobot/bin_2.16/AGILE_API1")  
-        from USB_control import usb_send
-        from AGILE_API import DianaApi  
-        from AGILE_API1 import DianaApi as DianaApi1  
-        self.usb_send = usb_send
-        self.log_msg = log_msg
-        self.DianaApi1 = DianaApi1
-        self.DianaApi = DianaApi    
-        self.init = init
-        self.loop = None 
-    def usb_grap(self,status,angle,robot_name):
-        u = self.init[robot_name]["USB"]
-        self.usb_send(u["port"], u["baudrate"], int(u["control_id"], 16) ,int(u["control_mode"], 16), int("0x0"+str(status),16),int(u["subdivision"], 16), angle,u["speed"])
-
-    def initialize(self):
-        self.DianaApi1.initSrv((self.init["ROBOT1"]["IP"], 0, 0, 0, 0, 0))  
-        self.DianaApi1.releaseBrake(self.init["ROBOT1"]["IP"])  
-        self.DianaApi.initSrv((self.init["ROBOT2"]["IP"], 0, 0, 0, 0, 0))  
-        self.DianaApi.releaseBrake(self.init["ROBOT2"]["IP"])
-
-    async def GoHome(self):
-        """
-        说明:
-            机械臂回原点
-        参数:
-            robot_name: "ROBOT1" or "ROBOT2"
-        """
-        async def left_gohome():
-            self.usb_grap(1, 1700, "ROBOT1")  
-            await self.async_MoveJ(self.init["Pose_List"]["basic_pose"]["l_base"], 'ROBOT1')
-            time.sleep(1.5)   
-            self.usb_grap(0, 750, "ROBOT1") 
-            
-        async def right_gohome():
-            self.usb_grap(1, 1700, "ROBOT2")
-            await self.async_MoveJ(self.init["Pose_List"]["basic_pose"]["r_base"], 'ROBOT2')    
-            time.sleep(1.5)
-            self.usb_grap(0, 750, "ROBOT2")
-            
-        await asyncio.gather(right_gohome(), left_gohome())
-
-
-    def get_current_pose(self,robot_name):
-        api = self.DianaApi1 if robot_name == "ROBOT1" else self.DianaApi  
-        srcMatrixPose=[0] * 6 # 工件坐标系的值
-        dstMatrixPose=[0] * 6
-        dstPose = [0] * 6
-        srcPose = [0] * 6
-        api.getTcpPoseByWorkPieceName(self.init[robot_name]["WorkPieceName"], srcMatrixPose,self.init[robot_name]["IP"])
-        poses = [0]*6
-        api.getTcpPos(poses, self.init[robot_name]["IP"])
-        # api.poseTransform(poses,srcMatrixPose,dstPose,dstMatrixPose) 
-        self.print_robot_pose(poses,dstMatrixPose,srcMatrixPose,robot_name)
-
-    def print_robot_pose(self,dstPose,dstMatrixPose,srcMatrixPose,robot_name):
-        api = self.DianaApi1 if robot_name == "ROBOT1" else self.DianaApi    
-        #查看发送坐标
-        srcPose1 = [0]*6
-        api.poseTransform(dstPose,dstMatrixPose,srcMatrixPose,srcPose1)
-        c=srcPose1[3:]   
-        api.axis2RPY(c)
-        rx1 = math.degrees(c[0])
-        ry1 = math.degrees(c[1])
-        rz1 = math.degrees(c[2])
-        pose1=[srcPose1[0]*1000,srcPose1[1]*1000,srcPose1[2]*1000,rx1,ry1,rz1]
-        pose1 = [round(num, 2) for num in pose1]
-        if self.log_msg["24"][1]==1: logging.debug(self.log_msg["24"][0].format(robot_name,pose1))
-
-
-
-    def get_robot_pose(self,dstPose,dstMatrixPose,srcMatrixPose,robot_name):
-        if robot_name == "left_arm": robot_name="ROBOT1"
-        elif robot_name == "right_arm": robot_name="ROBOT2"
-        api = self.DianaApi1 if robot_name == "ROBOT1" else self.DianaApi    
-        #查看发送坐标
-        srcPose1 = [0]*6
-        api.poseTransform(dstPose,dstMatrixPose,srcMatrixPose,srcPose1)
-        c=srcPose1[3:]   
-        api.axis2RPY(c)
-        rx1 = math.degrees(c[0])
-        ry1 = math.degrees(c[1])
-        rz1 = math.degrees(c[2])
-        pose1=[srcPose1[0]*1000,srcPose1[1]*1000,srcPose1[2]*1000,rx1,ry1,rz1]
-        pose1 = [round(num, 2) for num in pose1]
-        if self.log_msg["robot_cart_pose"][1]==1: logging.debug(self.log_msg["robot_cart_pose"][0].format(robot_name,pose1))
-
-
-    async def async_MoveJ(self, joint_pose, robot_name):
-        """
-        说明:
-            机械臂关节运动
-        参数:
-            joint_pose: 机械臂关节坐标
-            robot_name: 机械臂名称
-        """
-        if robot_name == "left_arm": robot_name="ROBOT1"
-        elif robot_name == "right_arm": robot_name="ROBOT2"
-        api = self.DianaApi1 if robot_name == "ROBOT1" else self.DianaApi
-        vel = self.init[robot_name]["Global_agile"]["vel"]
-        acc =  self.init[robot_name]["Global_agile"]["acc"]
-        zv_shaper_order = self.init[robot_name]["Global_agile"]["zv_shaper_order"]
-        zv_shaper_frequency = self.init[robot_name]["Global_agile"]["zv_shaper_frequency"]
-        zv_shaper_damping_ratio = self.init[robot_name]["Global_agile"]["zv_shaper_damping_ratio"]
-        ipAddress = self.init[robot_name]["IP"]
-        if self.loop is None:
-            self.loop = asyncio.get_running_loop()
-        await self.loop.run_in_executor(
-            None, 
-            lambda: api.moveJToTarget(joint_pose, vel+0.2,acc+0.2, zv_shaper_order, zv_shaper_frequency,zv_shaper_damping_ratio, ipAddress)
-        )
-        api.wait_move()
-
-    async def async_MoveL(self, card_pose, robot_name):
-        """
-        说明:
-            机械臂笛卡尔直线运动
-        参数:
-            card_pose: 机械臂笛卡尔运动坐标
-            robot_name: 机械臂名称
-        """
-        if robot_name == "left_arm": robot_name="ROBOT1"
-        elif robot_name == "right_arm": robot_name="ROBOT2"
-        api = self.DianaApi1 if robot_name == "ROBOT1" else self.DianaApi
-        vel = self.init[robot_name]["Global_agile"]["vel"]
-        acc =  self.init[robot_name]["Global_agile"]["acc"]
-        zv_shaper_order = self.init[robot_name]["Global_agile"]["zv_shaper_order"]
-        zv_shaper_frequency = self.init[robot_name]["Global_agile"]["zv_shaper_frequency"]
-        zv_shaper_damping_ratio = self.init[robot_name]["Global_agile"]["zv_shaper_damping_ratio"]
-        ipAddress = self.init[robot_name]["IP"]
-        srcMatrixPose=[0] * 6 # 工件坐标系的值
-        dstMatrixPose=[0] * 6
-        dstPose = [0] * 6
-        api.getTcpPoseByWorkPieceName(self.init[robot_name]["WorkPieceName"], srcMatrixPose,self.init[robot_name]["IP"])
-        srcPose = self.convert_units((card_pose[0], card_pose[1], card_pose[2], card_pose[3], card_pose[4], card_pose[5]),robot_name)
-        api.poseTransform(srcPose,srcMatrixPose,dstMatrixPose,dstPose)
-        # self.get_robot_pose(dstPose,dstMatrixPose,srcMatrixPose,robot_name)
-
-        if self.loop is None:
-            self.loop = asyncio.get_running_loop()
-        await self.loop.run_in_executor(
-            None, 
-            lambda: api.moveLToPose(dstPose, vel,acc, zv_shaper_order,
-                                    zv_shaper_frequency,zv_shaper_damping_ratio, 
-                                    ipAddress)
-        )
-        api.wait_move()
-    
-    def convert_units(self,pose,robot_name):
-        if robot_name == "left_arm": robot_name="ROBOT1"
-        elif robot_name == "right_arm": robot_name="ROBOT2"
-        api = self.DianaApi1 if robot_name == "ROBOT1" else self.DianaApi   
-        x, y, z, rx, ry, rz = pose
-        x_meters = x / 1000.0  
-        y_meters = y / 1000.0  
-        z_meters = z / 1000.0  
-        rx_radians = math.radians(rx)  
-        ry_radians = math.radians(ry)  
-        rz_radians = math.radians(rz)  
-        srcPose = [x_meters, y_meters, z_meters, rx_radians, ry_radians, rz_radians]  
-        a = srcPose[3:]
-        api.rpy2Axis(a)
-        srcPose[3:] = a
-        return srcPose
 
 class Function:
 
     def __init__(self, init, log_msg,robot,app):  
-        self.init = init  
+        self.init = init
         self.log_msg = log_msg
-        self.loop = None 
+        self.loop = None
         self.w1_instruction = W1_Instruction(log_msg,app)
-        # self.agile_instruction = AGILE_Instruction(init, log_msg)
         self.robot=robot
         self.app = app
 
-    async def Move_posetuning_list(self, pose_tuple_in, work_name, index=0, arm="all"):
+    def generate_multi_point_6d_trajectory_uniform(self,
+        waypoints: Sequence[Union[List[float], np.ndarray]],
+        total_points: int = 100,
+        angle_type: str = 'xyz',
+        show_all_points: bool = True,
+        show_orientation: bool = True,
+        orientation_skip: int = 5,
+        color_map: str = 'viridis'
+    ) -> np.ndarray:
+        """
+        按照轨迹总距离均匀分布点数的多转折点六维笛卡尔坐标轨迹生成。
+        
+        参数:
+            waypoints: 路径点序列 [[x,y,z,a,b,c], ...] (a,b,c为欧拉角，单位度)
+            total_points: 总的插值点数
+            angle_type: 欧拉角顺序 ('zyx', 'xyz'等)
+            show_all_points: 是否显示所有中间点
+            show_orientation: 是否显示姿态坐标系
+            orientation_skip: 姿态坐标系的显示间隔(确保每N个点显示一个)
+            color_map: 使用的颜色图谱名称
+        
+        返回:
+            numpy数组: (N, 6)的轨迹点数组(包含所有路径点)
+        """
+        # 输入验证
+        assert len(waypoints) >= 2, "至少需要两个路径点"
+        waypoints = [np.array(wp, dtype=float) for wp in waypoints]
+        assert all(len(wp) == 6 for wp in waypoints), "每个路径点必须是6维坐标"
+
+        # 计算每段的距离
+        segment_distances = []
+        for i in range(len(waypoints) - 1):
+            start = waypoints[i][:3]
+            end = waypoints[i + 1][:3]
+            distance = np.linalg.norm(end - start)
+            segment_distances.append(distance)
+
+        # 计算总距离
+        total_distance = sum(segment_distances)
+
+        # 根据每段距离分配点数
+        segment_points = [
+            max(2, int(total_points * (dist / total_distance))) for dist in segment_distances
+        ]
+
+        # 初始化轨迹列表
+        full_trajectory = []
+
+        # 生成每段轨迹
+        for i in range(len(waypoints) - 1):
+            start = waypoints[i]
+            end = waypoints[i + 1]
+            num = segment_points[i] - 1  # 每段包含起点和终点，所以中间点数为 num - 1
+
+            # 将角度转换为弧度用于计算
+            start_rad = start.copy()
+            end_rad = end.copy()
+            start_rad[3:] = np.deg2rad(start[3:])
+            end_rad[3:] = np.deg2rad(end[3:])
+
+            # 生成插值参数t (0到1之间)
+            t_values = np.linspace(0, 1, num + 2)  # 包含起点和终点
+
+            # 初始化轨迹数组（弧度）
+            trajectory_rad = np.zeros((num + 2, 6))
+
+            # ===== 位置部分 =====
+            trajectory_rad[:, :3] = start_rad[:3] + t_values.reshape(-1, 1) * (end_rad[:3] - start_rad[:3])
+
+            # ===== 姿态部分 =====
+            # 使用四元数插值确保平滑旋转
+            rot_start = R.from_euler(angle_type, start_rad[3:])
+            rot_end = R.from_euler(angle_type, end_rad[3:])
+
+            # 生成四元数插值
+            quats = np.array([(1 - t) * rot_start.as_quat() + t * rot_end.as_quat() for t in t_values])
+            quats /= np.linalg.norm(quats, axis=1)[:, np.newaxis]  # 归一化
+
+            # 转换回欧拉角并确保连续性
+            rotations = R.from_quat(quats)
+            euler_angles_rad = rotations.as_euler(angle_type)
+            for k in range(1, len(euler_angles_rad)):
+                for j in range(3):
+                    diff = euler_angles_rad[k, j] - euler_angles_rad[k - 1, j]
+                    if abs(diff) > np.pi:
+                        euler_angles_rad[k:, j] -= np.sign(diff) * 2 * np.pi
+            trajectory_rad[:, 3:] = euler_angles_rad
+
+            # 转换为角度输出
+            trajectory_deg = trajectory_rad.copy()
+            trajectory_deg[:, 3:] = np.rad2deg(trajectory_rad[:, 3:])
+
+            # 如果是中间段，去掉第一个点(避免重复)
+            if i > 0:
+                trajectory_deg = trajectory_deg[1:]
+
+            full_trajectory.append(trajectory_deg)
+
+        # 合并所有段
+        final_trajectory = np.vstack(full_trajectory)
+
+        return final_trajectory
+
+    def generate_multi_point_6d_trajectory_uniform_for_arms(self,
+        waypoints: dict,
+        total_points: int = 100,
+        angle_type: str = 'xyz'
+    ) -> dict:
+        """
+        对左右机械臂的轨迹分别进行均匀插值，并返回结果。
+
+        参数:
+            waypoints: 包含 "left_arm" 和 "right_arm" 的路径点字典。
+            total_points: 总的插值点数。
+            angle_type: 欧拉角顺序 ('zyx', 'xyz'等)。
+
+        返回:
+            包含 "left_arm" 和 "right_arm" 插值结果的字典。
+        """
+        assert "left_arm" in waypoints and "right_arm" in waypoints, "waypoints 必须包含 'left_arm' 和 'right_arm'"
+        
+        # 分别对左右臂进行插值
+        left_arm_trajectory = self.generate_multi_point_6d_trajectory_uniform(
+            waypoints["left_arm"],
+            total_points=total_points,
+            angle_type=angle_type
+        )
+        right_arm_trajectory = self.generate_multi_point_6d_trajectory_uniform(
+            waypoints["right_arm"],
+            total_points=total_points,
+            angle_type=angle_type
+        )
+        
+        # 返回结果
+        return {
+            "left_arm": left_arm_trajectory,
+            "right_arm": right_arm_trajectory
+        }
+
+    def smooth_trajectory(self,waypoints, num_points=100):
+        """
+        使用样条插值对轨迹进行平滑处理。
+        
+        参数:
+            waypoints: 原始路径点 [[x, y, z, a, b, c], ...]
+            num_points: 平滑后轨迹的总点数
+        
+        返回:
+            平滑后的轨迹点数组 (N, 6)
+        """
+        waypoints = np.array(waypoints)
+        t = np.linspace(0, 1, len(waypoints))  # 原始路径点的参数
+        t_smooth = np.linspace(0, 1, num_points)  # 平滑后的参数
+
+        # 对位置 (x, y, z) 进行样条插值
+        cs_x = CubicSpline(t, waypoints[:, 0])
+        cs_y = CubicSpline(t, waypoints[:, 1])
+        cs_z = CubicSpline(t, waypoints[:, 2])
+
+        # 对姿态 (a, b, c) 进行线性插值（避免角度跳跃）
+        cs_a = CubicSpline(t, waypoints[:, 3])
+        cs_b = CubicSpline(t, waypoints[:, 4])
+        cs_c = CubicSpline(t, waypoints[:, 5])
+
+        # 生成平滑轨迹
+        smooth_trajectory = np.zeros((num_points, 6))
+        smooth_trajectory[:, 0] = cs_x(t_smooth)
+        smooth_trajectory[:, 1] = cs_y(t_smooth)
+        smooth_trajectory[:, 2] = cs_z(t_smooth)
+        smooth_trajectory[:, 3] = cs_a(t_smooth)
+        smooth_trajectory[:, 4] = cs_b(t_smooth)
+        smooth_trajectory[:, 5] = cs_c(t_smooth)
+
+        return smooth_trajectory
+
+    def generate_multi_point_6d_trajectory_uniform_for_arms1(self,
+        waypoints: dict,
+        total_points: int = 100
+    ) -> dict:
+        """
+        对左右机械臂的轨迹分别进行平滑插值，并返回结果。
+
+        参数:
+            waypoints: 包含 "left_arm" 和 "right_arm" 的路径点字典。
+            total_points: 平滑后轨迹的总点数。
+
+        返回:
+            包含 "left_arm" 和 "right_arm" 平滑结果的字典。
+        """
+        assert "left_arm" in waypoints and "right_arm" in waypoints, "waypoints 必须包含 'left_arm' 和 'right_arm'"
+        
+        # 分别对左右臂进行平滑插值
+        left_arm_trajectory = self.smooth_trajectory(waypoints["left_arm"], num_points=total_points)
+        right_arm_trajectory = self.smooth_trajectory(waypoints["right_arm"], num_points=total_points)
+        
+        # 返回结果
+        return {
+            "left_arm": left_arm_trajectory,
+            "right_arm": right_arm_trajectory
+        }
+
+
+    def plane_fence(self,pose_tuple):
+        '''
+        平面围栏功能，判断机械臂是否在平面围栏内。
+        对于每个手臂的每个坐标，先转换至平面坐标系，
+        根据 z 值限幅后再转换回原始坐标系，
+        最终返回经过 z 限幅调整后的坐标数据元组（字典）。
+        '''
+        self.w1_instruction.tcp_setting()
+
+        '''
+        left
+        -319.888, 423.715, 141.818
+        -326.399, 423.704, 41.819
+        -292.89, 503.721, 111.798
+
+        right
+        328.706, 443.108, 161.28
+        326.531, 443.103, 51.267
+        299.043, 513.093, 81.279
+        '''
+        # 设置用户坐标系 --- 右臂
+        ro_pos = [328.706, 443.108, 161.28]  # 原点
+        rx_pos = [326.531, 443.103, 51.267]   # X 轴方向
+        rxy_pos = [299.043, 513.093, 81.279]    # XY 平面内其他点
+        self.right_T_matrix = self.cal_userframe_xpos(ro_pos, rx_pos, rxy_pos)
+        # 设置用户坐标系 --- 左臂
+        lo_pos = [-319.888, 423.715, 141.818]  # 原点
+        lx_pos = [-326.399, 423.704, 41.819]    # X 轴方向
+        lxy_pos = [-292.89, 503.721, 111.798]   # XY 平面内其他点
+        self.left_T_matrix = self.cal_userframe_xpos(lo_pos, lx_pos, lxy_pos)
+
+        # 定义 z 限制
+        l_z_down_limit = 0.4   # 左臂，平面z值最小值
+        r_z_down_limit = -0.4  # 右臂，平面z值最大值
+
+        processed_pose = {}  # 存放处理后的结果
+        # 针对每个臂处理
+        for arm in pose_tuple:
+            processed_pose[arm] = []
+            for pose in pose_tuple[arm]:
+                # 根据不同臂选择相应的用户坐标变换
+                if arm == "left_arm":
+                    plane_pose = self.transform_to_plane(pose, self.left_T_matrix)
+                    # print('left_move_pose',pose)
+                    # print('left_plane_pose',plane_pose)
+                    if plane_pose[2] < l_z_down_limit:
+                        if self.log_msg["exit1"][1] == 1:
+                            logging.info(self.log_msg["exit1"][0].format(plane_pose, l_z_down_limit,l_z_down_limit))
+                        plane_pose[2] = l_z_down_limit
+                        new_pose = self.inverse_transform_from_plane(plane_pose, self.left_T_matrix)
+                    else:
+                        new_pose = pose
+                elif arm == "right_arm":
+                    plane_pose = self.transform_to_plane(pose, self.right_T_matrix)
+                    # print('right_move_pose',pose)
+                    # print('right_plane_pose',plane_pose)
+                    if plane_pose[2] > r_z_down_limit:
+                        if self.log_msg["exit1"][1] == 1:
+                            logging.info(self.log_msg["exit1"][0].format(plane_pose, r_z_down_limit,r_z_down_limit))
+                        plane_pose[2] = r_z_down_limit
+                        new_pose = self.inverse_transform_from_plane(plane_pose, self.right_T_matrix)
+                    else:
+                        new_pose = pose
+                else:
+                    new_pose = pose
+                processed_pose[arm].append(new_pose)
+        return processed_pose
+
+
+    def save_point(self, sequence_move_tuple):
+        """
+        保存 sequence_move_tuple 信息到 JSON 文件:
+        - "left" 下的 "pose_list" 保存 sequence_move_tuple["left_arm"]
+        - "right" 下的 "pose_list" 保存 sequence_move_tuple["right_arm"]
+        """
+        file_path = "/home/dexforce/Documents/AGILE/move_pose.json"
+        
+        # 尝试读取已有数据；如果不存在则构造默认结构
+        # try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # except Exception:
+        #     data = {"left": {"pose_list": [], "mat": []}, "right": {"pose_list": [], "mat": []}}
+        
+        # 更新左右臂的 pose_list
+        data["left"]["pose_list"] = sequence_move_tuple.get("left_arm", [])
+        data["right"]["pose_list"] = sequence_move_tuple.get("right_arm", [])
+        
+        # 写入 JSON 文件
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        
+        print("Saved point data to", file_path)
+
+    def Move_posetuning_list(self, pose_tuple, work_name, index=0, arm="all"):
         """
         说明:
             movel可以每次移动一个坐标
@@ -505,134 +557,244 @@ class Function:
             work_name: 任务名
             arm: 臂选择，'all'代表使用config里的arm,left_arm或right_arm则是指定"work_name"固定使用该臂
         """
-        # from IPython import embed; embed()
-        pose_tuple_new = deepcopy(pose_tuple_in)
-        # pose_tuple = self.pose_deal(pose_tuple_new, work_name, index)
-        pose_t={}
-        pose_tuple = pose_tuple_new
-        config_list = self.init["Pose_List"][work_name]
-        euler = self.init["ROBOT1"]["Euler"]
-
-        def calculate_new_pose(pose_cfg, robot_cfg, target_arm):
-            """计算新的姿态坐标"""
-            if len(config_list[pose_cfg][0]) == 6:
-                return self.posetuning_calculate(
-                    pose_tuple_in[target_arm][robot_cfg[0]],
-                    config_list["apose"][robot_cfg[0]],
-                    config_list[pose_cfg][0],
-                    euler
-                )
-            return pose_tuple[robot_cfg[4]][robot_cfg[0]] if target_arm == 'all' else pose_tuple[target_arm][robot_cfg[0]]
-
-        def apply_offset(pose, offset, offset_type="base",arm=None):
+        def apply_offset(pose, offset, offset_type="base", arm=None):
             """应用偏移量"""
-            if offset != [0]:
-                pose = pose.copy()
-                if offset_type == "base":   
-                    pose[2] += offset[2]
-                if offset_type == "plane": 
+            if not isinstance(pose, dict) or not isinstance(arm, list):
+                raise ValueError("pose 应该是字典，arm 应该是列表")
 
-                    if arm=='right_arm':
-                    # 设置用户坐标系    
-                        o_pos = [336.075, 418.559, 230.13]  # 第一个点 (将作为原点)
-                        x_pos = [333.064, 418.572, 85.135]  # 第二个点 (X 轴方向)
-                        xy_pos = [296.07, 513.566, 135.14]  # 第三个点 (Y 轴方向)
-                        T_matrix = Function.cal_userframe_xpos(o_pos, x_pos, xy_pos)  # 设置用户坐标系
-                        # 将左右臂坐标转换至平面坐标系
-                        plane_pose = Function.transform_to_plane(pose, T_matrix)
-                        plane_pose[2] -= offset[2]
-                    else: 
-                        lo_pos = [-317.646, 409.471, 295.444]  # 第一个点 (将作为原点)
-                        lx_pos = [-322.595, 406.478, 173.461]  # 第二个点 (X 轴方向)
-                        lxy_pos = [-290.381, 488.574, 211.744]  # 第三个点 (Y 轴方向)
-                        T_matrix = Function.cal_userframe_xpos(lo_pos, lx_pos, lxy_pos)  # 设置用户坐标系
-                        plane_pose = Function.transform_to_plane(pose, T_matrix)
-                        plane_pose[2] += offset[2]
-                    pose = Function.inverse_transform_from_plane(plane_pose, T_matrix)
-                elif offset_type == "grab":
-                    pose = self.grabpose_xyz_offset(
-                        pose, {"x": offset[0], "y": offset[1], "z": offset[2]}
-                    )
-            return [round(num, 3 - len(str(int(num)))) if num != 0 else 0 for num in pose]
+            # 初始化结果字典
+            result_pose = {key: [] for key in pose.keys()}
 
-        async def execute_move(task_type, pose, arm, robot_cfg):
-            """执行移动任务"""
-            if self.log_msg[f"{task_type} success"][1] == 1:
-                logging.debug(self.log_msg[f"{task_type} success"][0].format(robot_cfg[4] if arm == 'all' else arm, pose))
+            # 初始化每个手臂的索引计数器
+            arm_indices = {"left_arm": 0, "right_arm": 0}
 
+            for current_arm in arm:
+                # 获取当前手臂的索引
+                arm_index = arm_indices[current_arm]
+
+                # 检查索引是否超出范围
+                if current_arm not in pose or arm_index >= len(pose[current_arm]):
+                    print(f"跳过无效的 arm 或超出索引范围: {current_arm}, 索引: {arm_index}")
+                    continue
+
+                single_pose = pose[current_arm][arm_index].copy()  # 获取当前 arm 的单个 pose
+
+                if offset != [0]:
+                    if offset_type == "base":
+                        single_pose[2] += offset[2]
+                        single_pose[0] += offset[0]
+                        single_pose[1] += offset[1]
+                    elif offset_type == "plane":
+                        if current_arm == 'right_arm':
+                            # 设置用户坐标系
+                            o_pos = [336.075, 418.559, 230.13]  # 第一个点 (将作为原点)
+                            x_pos = [333.064, 418.572, 85.135]  # 第二个点 (X 轴方向)
+                            xy_pos = [296.07, 513.566, 135.14]  # 第三个点 (Y 轴方向)
+                            T_matrix = self.cal_userframe_xpos(o_pos, x_pos, xy_pos)  # 设置用户坐标系
+                            # 将左右臂坐标转换至平面坐标系
+                            plane_pose = self.transform_to_plane(single_pose, T_matrix)
+                            plane_pose[2] -= offset[2]
+                            plane_pose[1] += offset[1]
+                            plane_pose[0] += offset[0]
+                        else:
+                            lo_pos = [-317.646, 409.471, 295.444]  # 第一个点 (将作为原点)
+                            lx_pos = [-322.595, 406.478, 173.461]  # 第二个点 (X 轴方向)
+                            lxy_pos = [-290.381, 488.574, 211.744]  # 第三个点 (Y 轴方向)
+                            T_matrix = self.cal_userframe_xpos(lo_pos, lx_pos, lxy_pos)  # 设置用户坐标系
+                            plane_pose = self.transform_to_plane(single_pose, T_matrix)
+                            plane_pose[2] += offset[2]
+                            plane_pose[1] += offset[1]
+                            plane_pose[0] += offset[0]
+                        single_pose = self.inverse_transform_from_plane(plane_pose, T_matrix)
+                    elif offset_type == "grab":
+                        single_pose = self.grabpose_xyz_offset(
+                            single_pose, {"x": offset[0], "y": offset[1], "z": offset[2]}
+                        )
+
+                # 将处理后的 pose 添加到结果中
+                result_pose[current_arm].append(
+                    [round(num, 3 - len(str(int(num)))) if num != 0 else 0 for num in single_pose]
+                )
+
+                # 更新当前手臂的索引
+                arm_indices[current_arm] += 1
+
+            return result_pose
+        
+        def execute_move(sequence_move_tuple,sequence_move_cfg_tuple,gripper_list,task_type="MoveL"):
+
+
+            """执行序列运动任务"""
+            # if self.log_msg[f"{task_type} success"][1] == 1:
+            #     logging.debug(self.log_msg[f"{task_type} success"][0].format(robot_cfg[4] if arm == 'all' else arm, pose))
+            success = False
             if task_type == "MoveL" and self.robot == "W1":
                 # left_fk_pose_list, right_fk_pose_list = self.w1_instruction.get_move_pose({arm: pose})
-                return await self.w1_instruction.async_MoveL1({arm: pose})
+                
+                success = self.w1_instruction.MoveL1(sequence_move_tuple,gripper_list)
+            return success
+            # elif task_type == "MoveJ" and self.robot == "W1":
+            #     pose_t[arm] = pose
+            #     return await self.w1_instruction.async_MoveJ1(pose_t)
 
-            elif task_type == "MoveJ" and self.robot == "W1":
-                pose_t[arm] = pose
-                return await self.w1_instruction.async_MoveJ1(pose_t)
-
-        # 遍历配置列表并执行任务
+        # from IPython import embed; embed()
+        config_list = self.init["Pose_List"][work_name]
+        euler = self.init["ROBOT1"]["Euler"]
+        sequence_move_cfg_tuple= {"left_arm": [], "right_arm": []}
+        sequence_move_tuple= {"left_arm": [], "right_arm": []}
+        id1=0
+        # from IPython import embed; embed()
+        gripper_list = []
         for pose_cfg in config_list:
+            # 构建运动坐标序列
             if "tpose" in pose_cfg or "jpose" in pose_cfg:
                 if self.log_msg["move_status"][1] == 1:
                     logging.info(self.log_msg["move_status"][0].format(work_name, pose_cfg))
-
-                robot_cfg = config_list[pose_cfg][3]
+                cfg = config_list[pose_cfg]
+                gripper_list.append(cfg["gripper"])
                 task_type = "MoveL" if "tpose" in pose_cfg else "MoveJ"
-
-                # 确定目标手臂
-                if robot_cfg[4] == "same":
-                    target_arm = arm
-                elif robot_cfg[4] == "dif":
-                    target_arm = "right_arm" if arm == "left_arm" else "left_arm"
-                else:
-                    target_arm = robot_cfg[4] if arm == "all" else arm
-
+                cfg_use_arm = cfg["use_arm"]
+                
                 # 计算目标姿态
                 if task_type == "MoveL":
-                    if isinstance(config_list[pose_cfg][0][0], str):
-                        pose_name = config_list[pose_cfg][0][0]
-                        if robot_cfg[4] == "same" and not pose_name.startswith(("l_", "r_")):
+                    o_pose = {"left_arm": [], "right_arm": []}  # 初始化为字典，包含两个空列表
+                    if "t" in cfg and isinstance(cfg["t"], str): # 字符串，用basic_pose的固定坐标
+                        pose_name = cfg["t"]
+                        if cfg_use_arm == "same" and not pose_name.startswith(("l_", "r_")):
                             pose_name = f"{'l_' if arm == 'left_arm' else 'r_'}{pose_name}"
-                        elif robot_cfg[4] == "dif" and not pose_name.startswith(("l_", "r_")):
+                        elif cfg_use_arm == "dif" and not pose_name.startswith(("l_", "r_")):
                             pose_name = f"{'r_' if arm == 'left_arm' else 'l_'}{pose_name}"
-                        elif robot_cfg[4] == "all" and not pose_name.startswith(("l_", "r_")) :
-                            pose_name = f"{'l_' if target_arm == 'left_arm' else 'r_'}{pose_name}"
+                        elif cfg_use_arm == "all" and not pose_name.startswith(("l_", "r_")) :
+                            # pose_name = f"{'l_' if cfg == 'left_arm' else 'r_'}{pose_name}"
+                            pose_name_l = f"{'l_'}{pose_name}"
+                            pose_name_r = f"{'r_'}{pose_name}"
+                            o_pose['left_arm'] = [self.init["Pose_List"]["basic_pose"][pose_name_l]]
+                            o_pose['right_arm'] = [self.init["Pose_List"]["basic_pose"][pose_name_r]]
+                            # from IPython import embed; embed()
+                            if 'uset' in pose_name_l:
+                                for i in range(len(arm)):
+                                    o_pose[arm[i]] = [self.posetuning_calculate(
+                                        pose_tuple[arm[i]][i],
+                                        config_list["apose"][arm[0]],
+                                        o_pose[arm[0]][0],
+                                        euler
+                                    )]
 
-                        new_pose = self.init["Pose_List"]["basic_pose"].get(pose_name, config_list[pose_cfg][0])
-                        new_pose = apply_offset(new_pose, config_list[pose_cfg][1], offset_type="plane")
-                        new_pose = apply_offset(new_pose, config_list[pose_cfg][2], offset_type="grab")
-                    else:
-                        new_pose = calculate_new_pose(pose_cfg, robot_cfg, target_arm)
-                        new_pose = apply_offset(new_pose, config_list[pose_cfg][1], offset_type="plane",arm=target_arm)
-                        new_pose = apply_offset(new_pose, config_list[pose_cfg][2], offset_type="grab")
+
+
+                    elif "t" in cfg and len(cfg["t"])==6 and not isinstance(cfg["t"], str): # 有使用示教
+                        for i in range(len(arm)):
+                            o_pose[arm[i]].append(self.posetuning_calculate(
+                                pose_tuple[arm[i]][i],
+                                config_list["apose"][arm[0]],
+                                cfg["t"],
+                                euler
+                            ))
+                    else: # 没使用示教
+                        arm_indices = {"left_arm": 0, "right_arm": 0}
+
+                        for current_arm in arm:
+                            arm_index = arm_indices[current_arm]
+                            pose = pose_tuple[current_arm][arm_index]
+                            o_pose[current_arm].append(pose)
+                            arm_indices['left_arm'] += 1
+                            arm_indices['right_arm'] += 1
+                    if "b" in cfg:
+                        o_pose = apply_offset(o_pose, cfg["b"], offset_type="plane",arm=arm)
+                    if "g" in cfg:
+                        o_pose = apply_offset(o_pose, cfg["g"], offset_type="grab", arm=arm)
+
+                    o_pose1 = deepcopy(o_pose)
+                    # for key in o_pose:
+                    #     o_pose[key] = [[id1] + cfg["gripper"] + (item if isinstance(item, list) else [item]) + ['movel'] for item in o_pose[key]]
+
+                    # for key in sequence_move_cfg_tuple:
+                    #     sequence_move_cfg_tuple[key].extend(o_pose[key])
+
+                    for key in o_pose1:
+                        o_pose1[key] = [item for item in o_pose1[key]]
+                    for key in sequence_move_tuple:
+                        sequence_move_tuple[key].extend(o_pose1[key])
+                    id1 +=1
                 else:  # MoveJ
-                    pose_name1 = config_list[pose_cfg][0]
-                    pose_name = pose_name1[0]
-                    if isinstance(pose_name[0], str):
-                        if robot_cfg[4] == "same" and not pose_name.startswith(("l_", "r_")):
-                            pose_name = f"{'l_' if arm == 'left_arm' else 'r_'}{pose_name}"
-                        elif robot_cfg[4] == "dif" and not pose_name.startswith(("l_", "r_")):
-                            pose_name = f"{'r_' if arm == 'left_arm' else 'l_'}{pose_name}"
-                        elif robot_cfg[4] == "all" and not pose_name.startswith(("l_", "r_")) :
-                            pose_name = f"{'l_' if target_arm == 'left_arm' else 'r_'}{pose_name}"
+                    o_pose = {"left_arm": [], "right_arm": []}  # 初始化结果字典
 
-                        new_pose = self.init["Pose_List"]["basic_pose"].get(pose_name, config_list[pose_cfg][0])
-                    else:
-                        new_pose = config_list[pose_cfg][0]
-
-                # 执行任务
-                success = await execute_move(task_type, new_pose, target_arm, robot_cfg)
-
-                # 处理夹爪状态
-                time.sleep(robot_cfg[1])
-                self.w1_instruction.gripper(arm, robot_cfg[2])
-                time.sleep(robot_cfg[3])
-
-                # 发送命令到 app
-                if "app" in pose_cfg:
-                    command = config_list[pose_cfg][4][0]
-                    self.app.osend(command)
+                    for current_arm in arm:
+                        pose_name = cfg["t"]
+                        if isinstance(pose_name, str):  # 检查 pose_name 是否为字符串列表
+                            if cfg["use_arm"] == "same" and not pose_name.startswith(("l_", "r_")):
+                                pose_name = f"{'l_' if current_arm == 'left_arm' else 'r_'}{pose_name}"
+                            elif cfg["use_arm"] == "dif" and not pose_name.startswith(("l_", "r_")):
+                                pose_name = f"{'r_' if current_arm == 'left_arm' else 'l_'}{pose_name}"
+                            elif cfg["use_arm"] == "all" and not pose_name.startswith(("l_", "r_")):
+                                pose_name = f"{'l_' if current_arm == 'left_arm' else 'r_'}{pose_name}"
+                            pose_value = self.init["Pose_List"]["basic_pose"].get(pose_name)
+                        else:
+                            pose_value = config_list[pose_cfg][0]
+                        o_pose[current_arm].append(pose_value)
 
 
-    def cal_userframe_xpos(o_pos: list, x_pos: list, xy_pos: list):
+                    o_pose1 = deepcopy(o_pose)
+                    # for key in o_pose:
+                    #     o_pose[key] = [[id1] + cfg["gripper"] + item + ['movej'] for item in o_pose[key]]
+                    # for key in sequence_move_cfg_tuple:
+                    #     sequence_move_cfg_tuple[key].extend(o_pose[key])
+
+                    for key in o_pose1:
+                        o_pose1[key] = [item for item in o_pose1[key]]
+                    for key in sequence_move_tuple:
+                        sequence_move_tuple[key].extend(o_pose1[key])
+                    id1 +=1
+
+        # 循环打印信息
+        # print("left_arm")
+        # for i in range(len(sequence_move_cfg_tuple["left_arm"])):
+        #     print(sequence_move_cfg_tuple["left_arm"][i])
+        # print("right_arm")
+        # for i in range(len(sequence_move_cfg_tuple["left_arm"])):
+        #     print(sequence_move_cfg_tuple["right_arm"][i])   
+        if arm == ["left_arm"]:
+            # 获取当前右臂位姿（使用 get_current_pose() 返回的第一个元素，即位姿）
+            right_current_pose = self.w1_instruction.get_current_pose('r')[0]
+            left_len = len(sequence_move_tuple["left_arm"])
+            sequence_move_tuple["right_arm"] = [right_current_pose for _ in range(left_len)]
+        elif arm == ["right_arm"]:
+            # 获取当前右臂位姿（使用 get_current_pose() 返回的第一个元素，即位姿）
+            left_current_pose = self.w1_instruction.get_current_pose('l')[0]
+            right_len = len(sequence_move_tuple["right_arm"])
+            sequence_move_tuple["left_arm"] = [left_current_pose for _ in range(right_len)]
+
+        print("left_arm")
+        for i in range(len(sequence_move_tuple["left_arm"])):
+            print(sequence_move_tuple["left_arm"][i])
+        print("right_arm")
+        for i in range(len(sequence_move_tuple["right_arm"])):
+            print(sequence_move_tuple["right_arm"][i])   
+
+        sequence_move_tuple = self.plane_fence(sequence_move_tuple)
+        sequence_move_tuple1 = deepcopy(sequence_move_tuple)
+        sequence_move_tuple1['right_arm'].insert(0,[84.571, 344.751, 297.377, -152.507, 89.502, -134.165])
+        sequence_move_tuple1['left_arm'].insert(0,[-91.662, 348.08, 295.14, 0.018, 86.569, 162.578])
+        sequence_move_tuple1['right_arm'].extend([[100, 344.751, 297.377, -152.507, 89.502, -134.165]])
+        sequence_move_tuple1['left_arm'].extend([[-100, 348.08, 295.14, 0.018, 86.569, 162.578]])
+        trajectories = self.generate_multi_point_6d_trajectory_uniform_for_arms1(sequence_move_tuple1,total_points=100)
+        trajectories["left_arm"] = trajectories["left_arm"].tolist()
+        trajectories["right_arm"] = trajectories["right_arm"].tolist()
+
+        # self.save_point(sequence_move_tuple)  
+        self.save_point(trajectories)
+        
+        # from IPython import embed; embed()
+        success = execute_move(sequence_move_tuple,sequence_move_cfg_tuple,gripper_list)
+        if success == False:
+            input("执行失败")
+        # 发送命令到 app
+        if "app" in pose_cfg:
+            command = config_list[pose_cfg][4][0]
+            self.app.osend(command)
+
+
+    def cal_userframe_xpos(self,o_pos: list, x_pos: list, xy_pos: list):
         """Calculate the User Frame transformation matrix.
         Args: 
             o_pos (list): Origin position of the User Frame [x, y, z].
@@ -665,7 +827,7 @@ class Function:
         userframe_xpos[:3, 3] = o_pos   # Origin position
         return userframe_xpos
 
-    def transform_to_plane(pose, T):
+    def transform_to_plane(self,pose, T):
         """
         将坐标系转换为平面坐标系
         参数：
@@ -687,7 +849,7 @@ class Function:
         new_pose_list = np.round(new_pose, 2).tolist()
         return new_pose_list
 
-    def inverse_transform_from_plane(plane_pose, T):
+    def inverse_transform_from_plane(self,plane_pose, T):
         """
         将平面坐标转换回原始坐标系
         参数：
@@ -715,7 +877,7 @@ class Function:
         original_pose_list = np.round(original_pose, 2).tolist()
         return original_pose_list
 
-    def grabpose_xyz_offset(self, pose, offset):
+    def grabpose_xyz_offset( self,pose, offset):
         """
         沿着抓取点自身坐标系的方向进行偏移
         
@@ -818,13 +980,17 @@ class Function:
         # if right_arm_range[0] < pose_tuple["right_arm"][0][axis] < right_arm_range[1]:  
         #     use_arm = "right_arm"
         # from IPython import embed; embed()
-        if pose_tuple["left_arm"][0][2] < pose_tuple["right_arm"][0][2]:
-            use_arm = "right_arm"
-        else: use_arm = "left_arm"
+
+        # W1左右手的坐标系在各臂的原点，坐标可以根据X轴值的大小来判断
 
 
-        logging.info(self.log_msg["use_arm"][0].format(use_arm))
 
+        use_arm=[0]*len(pose_tuple['left_arm'])
+        for i in range(len(pose_tuple['left_arm'])):
+            if pose_tuple["left_arm"][i][2] < pose_tuple["right_arm"][i][2]:
+                use_arm[i] = "right_arm"
+            else: use_arm[i] = "left_arm"
+            logging.info(self.log_msg["use_arm"][0].format(use_arm))
         return use_arm
 
     def pose_deal(self, pose_tuple, work_name, index):
@@ -993,7 +1159,7 @@ class Function:
             pose_matrix[:3,:3] = rot_matrix
             pose_matrix[:3,3] = [pose[0],pose[1],pose[2]]
             return np.mat(pose_matrix)
-        if self.log_msg["teach"][1]==1: logging.info(self.log_msg["teach"][0].format(robot_pose,shotpose,grabpose))
+        if self.log_msg["teach_offset"][1]==1: logging.info(self.log_msg["teach_offset"][0].format(robot_pose,shotpose,grabpose))
         if shotpose[5]=="n":
             return grabpose
         else:

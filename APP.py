@@ -34,15 +34,18 @@ class App:
             running = True
             app_camera_pose='0,0,0,0,0,0'
             app_camera_pose = self.app.recv(1024).decode("utf-8")
-            # app_camera_pose = '1,203.3,46.9,548.6,9.0,4.7,160.5'
+            # app_camera_pose = '1,-244.0,344.0,-3.0,-89.0,-6.347,68.855'
             if self.log_msg["app return msg"][1]==1: logging.info(self.log_msg["app return msg"][0].format(app_camera_pose))  
-
-            while '0,0,0,0,0,0' in app_camera_pose:
-                input("按 Enter 键触发视觉拍照...\n") 
-                self.osend(app_recv)
-                app_camera_pose = self.app.recv(1024).decode("utf-8")
-                if self.log_msg["app return msg"][1]==1: logging.info(self.log_msg["app return msg"][0].format(app_camera_pose))  
-
+            a=0
+            while '0,0,0,0,0,0' in app_camera_pose and a!="2" :
+                a = input("按 1 键触发视觉拍照，按 2 键代表无物料\n") 
+                if a == '1':
+                    self.osend(app_recv)
+                    app_camera_pose = self.app.recv(1024).decode("utf-8")
+                    if self.log_msg["app return msg"][1]==1: logging.info(self.log_msg["app return msg"][0].format(app_camera_pose))  
+                if a == '2':
+                    if self.log_msg["app return msg"][1]==1: logging.info(self.log_msg["app return msg"][0].format(app_camera_pose))  
+            
             if calib_now == False:
                 camera_pose_list, pose_param_list, pose_num = self.analysis_app_msg(app_camera_pose)
                 robot1_pose_list, robot2_pose_list = self.get_calib_robot_pose_list(camera_pose_list)
@@ -54,6 +57,10 @@ class App:
             app_send = self.app.recv(1024).decode("utf-8")
             if self.log_msg["app return msg"][1]==1: logging.info(self.log_msg["app return msg"][0].format(app_send))  
             return app_send  
+
+
+
+
 
     def send_recv(self, app_recv: str,calib=2):  
         """
@@ -77,16 +84,72 @@ class App:
 
             return pose_tuple, pose_param_list  
 
+    def send_recv_num(self, app_recv: str,calib=2,recv_num=1,send_order=None):  
+        """
+        说明:
+            接受多次视觉坐标再返回
+        参数:
+            app_recv: 发送给app的字符串
+            calib: 1表示视觉返回机器人坐标系坐标,使用app的标定,2表示视觉返回两个相机坐标系坐标,脚本双臂标定
+            recv_num: 接收次数。
+        """
+        pose_tuple_all = {"left_arm": [], "right_arm": []}  # 初始化为字典，包含两个空列表
+        if calib==1:
+            while True:
+                app_send=[]
+                if self.log_msg["app recv msg"][1]==1: logging.info(self.log_msg["app recv msg"][0].format(app_recv))  
+                self.app.send(app_recv.encode())
+                app_send = self.app.recv(1024).decode("utf-8")
+                if self.log_msg["app return msg"][1]==1: logging.info(self.log_msg["app return msg"][0].format(app_send))
+                return app_send
+        elif calib==2:
+            for i in range(recv_num):
+                if send_order != None:
+                    self.osend(send_order[i])
+                else:
+                    self.osend(app_recv)
+                pose_tuple, pose_param_list = self.orecv(send_order[i])
+                pose_tuple_all["left_arm"].extend(pose_tuple["left_arm"])
+                pose_tuple_all["right_arm"].extend(pose_tuple["right_arm"])
 
-    def calib_send(self, app_recv: str):  
-        if self.log_msg["app recv msg"][1]==1: logging.info(self.log_msg["app recv msg"][0].format(app_recv))  
-        self.app.send(app_recv.encode())   
+            return pose_tuple_all, pose_param_list
+
+
+    def send_recv2_num(self, app_recv: str,calib=2,recv_num=1):  
+        """
+        说明:
+            视觉同时发送两个坐标，处理两次坐标再返回
+        参数:
+            app_recv: 发送给app的字符串
+            calib: 1表示视觉返回机器人坐标系坐标,使用app的标定,2表示视觉返回两个相机坐标系坐标,脚本双臂标定
+            recv_num: 接收次数。
+        """
+        pose_tuple_all = {"left_arm": [], "right_arm": []}  # 初始化为字典，包含两个空列表
+        if calib==1:
+            while True:
+                app_send=[]
+                if self.log_msg["app recv msg"][1]==1: logging.info(self.log_msg["app recv msg"][0].format(app_recv))  
+                self.app.send(app_recv.encode())
+                app_send = self.app.recv(1024).decode("utf-8")
+                if self.log_msg["app return msg"][1]==1: logging.info(self.log_msg["app return msg"][0].format(app_send))
+                return app_send
+        elif calib==2:
+            # from IPython import embed; embed()
+            self.osend(app_recv)
+            pose_tuple, pose_param_list = self.orecv(app_recv)
+            pose_tuple_all["left_arm"].extend(pose_tuple["left_arm"])
+            pose_tuple_all["right_arm"].extend(pose_tuple["right_arm"])
+            return pose_tuple_all, pose_param_list
+
+    def calib_send(self, app_recv: str):
+        if self.log_msg["app recv msg"][1]==1: logging.info(self.log_msg["app recv msg"][0].format(app_recv))
+        self.app.send(app_recv.encode())
 
     def analysis_app_msg(self,msg):
-            pose_elements = msg.split(',')  
+            pose_elements = msg.split(',')
             pose_elements = [item for item in pose_elements if item != '']   #去掉所有空的字符串，末尾有逗号就会有空字符串
             pose_num = int(pose_elements[0])
-            pose_list = []  
+            pose_list = []
             pose_param_list = []
             elements_per_pose = self.init["APP"]["Pose_Type_Num"]
 
